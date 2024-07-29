@@ -144,9 +144,9 @@ namespace IC3 {
 
       // construct lifting solver
 #ifdef READ_CODE
-      cout << "Creating lifting solver" << endl;
+      cout << "\tCreating lifting solver" << endl;
       cout << "\tLoading transition relation" << endl;
-      cout << "Creating IC3 done" << endl << endl;
+      cout << "\tCreating IC3 done" << endl << endl;
 #endif
       lifts = model.newSolver();
       // don't assert primed invariant constraints
