@@ -72,9 +72,6 @@ Minisat::Solver * Model::newSolver() const {
   
   for (size_t i = 0; i < vars.size(); ++i) {
     Minisat::Var nv = slv->newVar();
-#ifdef READ_CODE
-    cout << "\tNew var: " << nv << " " << vars[i].index() << " " << vars[i].name() << endl;
-#endif
     assert (nv == vars[i].var());
   }
 
@@ -283,6 +280,10 @@ void Model::loadError(Minisat::Solver & slv) const {
     if (require.find(i->lhs) == require.end() 
         && require.find(~i->lhs) == require.end())
       continue;
+    
+#ifdef READ_CODE
+    cout << "\tAdding AIG row: " << stringOfLit(i->lhs) << " = " << stringOfLit(i->rhs0) << " & " << stringOfLit(i->rhs1) << endl;
+#endif
     // encode into CNF
     slv.addClause(~i->lhs, i->rhs0);
     slv.addClause(~i->lhs, i->rhs1);
@@ -293,21 +294,6 @@ void Model::loadError(Minisat::Solver & slv) const {
   }
 
 #ifdef READ_CODE
-  LitSet dummyRequire;
-  dummyRequire.insert(_error);
-  for (AigVec::const_reverse_iterator i = aig.rbegin(); i != aig.rend(); ++i) {
-    // skip if this row is not required
-    if (dummyRequire.find(i->lhs) == dummyRequire.end() 
-        && dummyRequire.find(~i->lhs) == dummyRequire.end())
-      continue;
-    // encode into CNF
-    cout << "\tAdding clause: " << stringOfLit(~i->lhs) << " " << stringOfLit(i->rhs0) << endl;
-    cout << "\tAdding clause: " << stringOfLit(~i->lhs) << " " << stringOfLit(i->rhs1) << endl;
-    cout << "\tAdding clause: " << stringOfLit(~i->rhs0) << " " << stringOfLit(~i->rhs1) << " " << stringOfLit(i->lhs) << endl;
-
-    dummyRequire.insert(i->rhs0);
-    dummyRequire.insert(i->rhs1);
-  }
   cout << "Loading error done" << endl << endl;
 #endif
 }

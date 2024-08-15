@@ -305,6 +305,8 @@ namespace IC3 {
     };
     vector<Frame> frames;
 
+    // lifts is a solver for lifting states.
+    // The only use of lifts is in stateOf().
     Minisat::Solver * lifts;
     Minisat::Lit notInvConstraints;
 
@@ -319,6 +321,10 @@ namespace IC3 {
         cout << "\tCreating solver for consecution of frame " << fr.k << endl;
 #endif
         fr.consecution = model.newSolver();
+
+#ifdef READ_CODE
+        cout << "\tnumVars after creating solver: " << fr.consecution->nVars() << endl;
+#endif
         if (random) {
           fr.consecution->random_seed = rand();
           fr.consecution->rnd_init_act = true;
@@ -333,6 +339,7 @@ namespace IC3 {
 
 #ifdef READ_CODE
         cout << "\tFrame " << fr.k << ": transition relation loaded" << endl;
+        cout << "\tnumVars after loading TR: " << fr.consecution->nVars() << endl;
 #endif
       }
     }
@@ -344,8 +351,12 @@ namespace IC3 {
     // addCube() calls.
     struct HeuristicLitOrder {
       HeuristicLitOrder() : _mini(1<<20) {}
+      // tzzht: counts[i] stores the number of times the literal with variable i appears in the cube
       vector<float> counts;
+      // tzzht: _mini is the minimum variable index of the literals in the cube
       size_t _mini;
+
+      // tzzht: The count function and decay function are only called within the updateLitOrder function.
       void count(const LitVec & cube) {
         assert (!cube.empty());
         // assumes cube is ordered
@@ -355,12 +366,14 @@ namespace IC3 {
         for (LitVec::const_iterator i = cube.begin(); i != cube.end(); ++i)
           counts[(size_t) Minisat::toInt(Minisat::var(*i))] += 1;
       }
+      // tzzht: decay the counts of all literals
       void decay() {
         for (size_t i = _mini; i < counts.size(); ++i)
           counts[i] *= 0.99;
       }
     } litOrder;
 
+    // tzzht: slimLitOrder is the order of literals. It is used to sort the literals when dropping literals in lemma generalization and when adding assumptions to Minisat.
     struct SlimLitOrder {
       HeuristicLitOrder *heuristicLitOrder;
 
@@ -376,6 +389,9 @@ namespace IC3 {
       }
     } slimLitOrder;
 
+    // updateLitOrder is only called in addCube function with toAll = true, that is, we find a new cube and add it to all levels below the current level.
+    // numUpdates is the number of lemmas. numLits is the total number of literals in all lemmas.
+    // these two float variables are used to caculate the average number of literals in a cube.
     float numLits, numUpdates;
     void updateLitOrder(const LitVec & cube, size_t level) {
       litOrder.decay();
@@ -385,6 +401,7 @@ namespace IC3 {
     }
 
     // order according to preference
+    // tzzht: literals with smaller count will be in the front
     void orderCube(LitVec & cube) {
       stable_sort(cube.begin(), cube.end(), slimLitOrder);
     }
@@ -392,17 +409,22 @@ namespace IC3 {
     typedef Minisat::vec<Minisat::Lit> MSLitVec;
 
     // Orders assumptions for Minisat.
+    // tzzht: if rev is false, the literals with smaller count will be in the front, otherwise, reverse the order.
     void orderAssumps(MSLitVec & cube, bool rev, int start = 0) {
       stable_sort(cube + start, cube + cube.size(), slimLitOrder);
       if (rev) reverse(cube + start, cube + cube.size());
     }
 
+    // StateOf will extract a state from the frame.
+    // How does it utilize the SAT solver? it creates two clauses: cls and assumps.
+    //    The cls clause composed of ~act, successor(if not given, it is P')
+    //    The assumps clause composed of act, inputs, primed inputs, 
     // Assumes that last call to fr.consecution->solve() was
     // satisfiable.  Extracts state(s) cube from satisfying
     // assignment.
     size_t stateOf(Frame & fr, size_t succ = 0) {
 #ifdef READ_CODE
-      cout << "Extracting state of frame " << fr.k << endl;
+      cout << "\tExtracting state of frame " << fr.k << endl;
 #endif
       // create state
       size_t st = newState();
@@ -431,6 +453,10 @@ namespace IC3 {
           state(st).inputs.push_back(pi);  // record full inputs
           assumps.push(pi);
         }
+        else {
+          cout << "Error: stateOf: input not assigned" << endl;
+          exit(1);
+        }
       }
       // some properties include inputs, so assert primed inputs after        
       for (VarVec::const_iterator i = model.beginInputs(); 
@@ -452,9 +478,20 @@ namespace IC3 {
           assumps.push(la);
         }
       }
+#ifdef READ_CODE
+      cout << "\t\tExtracted state: " << stringOfLitVec(latches) << endl;
+#endif
+      // here orderAssumps will order the latches(start from sz, end at assumps.size() in the assumps clause)
       orderAssumps(assumps, false, sz);  // empirically found to be best choice
-      // State s, inputs i, transition relation T, successor t:
-      //   s & i & T & ~t' is unsat
+      // State s, inputs in, primed inputs in', transition relation T, P'
+      // The last sat call of F_i was sat, there are two cases:
+      //    1. in fr.consecution, IC3 checks if F_i & ~state & T & state' is sat, and it is sat(this means the state is not inductive relative to F_i, so we need to extract the predecessor and add it to the obligation queue)
+      //    2. in strengthen, IC3 checks if F_k & T & ~P is sat, and it is sat(this means we find a CTI, so we need to extract this CTI and add it to the obligation queue)
+      // The model(latches, inputs, primed inputs) is extracted above, and IC3 wants to make it bigger(less literals).
+      // So it uses SAT solver to solve the following formula:
+      //   s & i & i' & T & ~t' or s & i & i' & T & P'
+      // Note that this formula contains the state s, inputs i, primed inputs i', transition relation T, so the next state of s is determined. This means this sat call must be unsat.
+      // Then we can get the unsat core, which generalizes the state s.
       // Core assumptions reveal a lifting of s.
       ++nQuery; startTimer();  // stats
       bool rv = lifts->solve(assumps);
@@ -466,6 +503,9 @@ namespace IC3 {
           state(st).latches.push_back(*i);  // record lifted latches
       // deactivate negation of successor
       lifts->releaseVar(~act);
+#ifdef READ_CODE
+      cout << "\t\tLifted state: " << stringOfLitVec(state(st).latches) << endl;
+#endif
       return st;
     }
 
@@ -478,6 +518,8 @@ namespace IC3 {
     // inductive and core is provided, extracts the unsat core.  If
     // it's not inductive and pred is provided, extracts
     // predecessor(s).
+    // clause: ~act | ~latches
+    // assumps: act & latches'
     bool consecution(size_t fi, const LitVec & latches, size_t succ = 0,
                      LitVec * core = NULL, size_t * pred = NULL, 
                      bool orderedCore = false)
@@ -637,6 +679,7 @@ namespace IC3 {
       size_t attempts = micAttempts;
       orderCube(cube);
       for (size_t i = 0; i < cube.size();) {
+        // try dropping i-th literal
         LitVec cp(cube.begin(), cube.begin() + i);
         cp.insert(cp.end(), cube.begin() + i+1, cube.end());
         if (ctgDown(level, cp, i, recDepth)) {
@@ -672,11 +715,18 @@ namespace IC3 {
 
     size_t earliest;  // track earliest modified level in a major iteration
 
+    // tzzht: addCube is called in 
+    //    1. ctgDown function
+    //    2. generalize function
+    //    3. propagate function
+    // 1. 2. are called with toAll = true, meaning that the cube is added to all levels below the current level. This is because the cube is inductive relative to the current level, and this is the first time we add this cube to the frames.
+    // 3. is called with toAll = false, meaning that the cube is added to the current level only. This is because in the propagate function, the cube is already in all levels below the current level, and we only need to add it to the current level.
     // Adds cube to frames at and below level, unless !toAll, in which
     // case only to level.
     void addCube(size_t level, LitVec & cube, bool toAll = true, 
                  bool silent = false)
     {
+      // sort cube
       sort(cube.begin(), cube.end());
       pair<CubeSet::iterator, bool> rv = frames[level].borderCubes.insert(cube);
       if (!rv.second) return;
@@ -804,14 +854,14 @@ namespace IC3 {
         if (!rv) return true;
         // handle CTI with error successor
 #ifdef READ_CODE
-        cout << "\tFound CTI: " << stringOfLitVec(state(stateOf(frontier)).latches) << endl;
+        cout << "\tFound CTI:" << endl;
 #endif
         ++nCTI;  // stats
         trivial = false;
         PriorityQueue pq;
         // enqueue main obligation and handle
 #ifdef READ_CODE
-        cout << "\tAdding obligation: state = " << stringOfLitVec(state(stateOf(frontier)).latches) << ", level = " << k-1 << ", depth = 1" << ". So we need to prove it is not reachable from level " << k-1 << endl;
+        cout << "\tAdding obligation: state = CTI, level = " << k-1 << ", depth = 1" << ". So we need to prove it is not reachable from level " << k-1 << endl;
 #endif
         pq.insert(Obligation(stateOf(frontier), k-1, 1));
         if (!handleObligations(pq))
